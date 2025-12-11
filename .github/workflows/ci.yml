@@ -1,11 +1,11 @@
 #
 #  OpenSSL for iOS and Android - CI Workflow
-#          Created by Leso_KN - 2020
+#  Updated to build for all Android ABIs (arm64-v8a, armeabi-v7a, x86_64)
 #
 
 name: CI
 
-on: 
+on:
   workflow_dispatch:
 
 ##
@@ -17,7 +17,7 @@ jobs:
       - name: Generate Data
         run: |
           sha="${{ github.sha }}" && echo "short_sha=${sha:0:8}" >> $GITHUB_ENV
-          dt="${{ github.event.commits[0].timestamp }}" && echo "release_date=${dt:0:10}" >> $GITHUB_ENV
+          dt=$(date +%Y-%m-%d) && echo "release_date=${dt}" >> $GITHUB_ENV
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -36,30 +36,43 @@ jobs:
   openssl-nghttp2:
     strategy:
       matrix:
-        target: [ios, android]
         component: [openssl, nghttp2]
-        include:
-          
+        config:
           # iOS Configuration
           - target: ios
             arch: arm64
+            abi: ""
             sdk: iphoneos
             api: "8.0"
             platform: iPhoneOS
-
-          # Android Configuration
+          # Android arm64-v8a
           - target: android
             arch: arm64
             abi: arm64-v8a
-            api: 35
-
+            sdk: ""
+            api: 21
+            platform: ""
+          # Android armeabi-v7a
+          - target: android
+            arch: arm
+            abi: armeabi-v7a
+            sdk: ""
+            api: 16
+            platform: ""
+          # Android x86_64
+          - target: android
+            arch: x86_64
+            abi: x86_64
+            sdk: ""
+            api: 21
+            platform: ""
+        include:
           # OpenSSL version
           - component: openssl
-            version: "3.5.3"
-
+            version: "1.1.1w"
           # nghttp2 version
           - component: nghttp2
-            version: "1.67.1"
+            version: "1.40.0"
 
       fail-fast: false
 
@@ -77,24 +90,34 @@ jobs:
           export ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk-bundle
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
 
-          echo "arch=${{ matrix.arch }}" >> $GITHUB_ENV
-          echo "abi=${{ matrix.abi }}" >> $GITHUB_ENV
-          echo "sdk=${{ matrix.sdk }}" >> $GITHUB_ENV
-          echo "api=${{ matrix.api }}" >> $GITHUB_ENV
-          echo "platform=${{ matrix.platform }}" >> $GITHUB_ENV
+          echo "arch=${{ matrix.config.arch }}" >> $GITHUB_ENV
+          echo "abi=${{ matrix.config.abi }}" >> $GITHUB_ENV
+          echo "sdk=${{ matrix.config.sdk }}" >> $GITHUB_ENV
+          echo "api=${{ matrix.config.api }}" >> $GITHUB_ENV
+          echo "platform=${{ matrix.config.platform }}" >> $GITHUB_ENV
           echo "version=${{ matrix.version }}" >> $GITHUB_ENV
-          
-          echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.target }}-${{ matrix.arch }}" >> $GITHUB_ENV
+
+          # Use abi for Android, arch for iOS
+          if [ -n "${{ matrix.config.abi }}" ]; then
+            echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.config.target }}-${{ matrix.config.abi }}" >> $GITHUB_ENV
+          else
+            echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.config.target }}-${{ matrix.config.arch }}" >> $GITHUB_ENV
+          fi
 
           source $GITHUB_ENV
           set
-      - name: Build ${{ matrix.component }} for ${{ matrix.target }}
+      - name: Build ${{ matrix.component }} for ${{ matrix.config.target }} ${{ matrix.config.abi || matrix.config.arch }}
         run: |
           cd tools
-          ./build-${{ matrix.target }}-${{ matrix.component }}.sh
+          ./build-${{ matrix.config.target }}-${{ matrix.component }}.sh
           cd ..
           mkdir -p "$product_dir/"{lib,include}
-          mv "output/${{ matrix.target }}/${{ matrix.component }}-${{ matrix.abi || matrix.arch }}/"{lib,include} "$product_dir/" || true
+          # For Android use abi, for iOS use arch
+          if [ -n "${{ matrix.config.abi }}" ]; then
+            mv "output/${{ matrix.config.target }}/${{ matrix.component }}-${{ matrix.config.abi }}/"{lib,include} "$product_dir/" || true
+          else
+            mv "output/${{ matrix.config.target }}/${{ matrix.component }}-${{ matrix.config.arch }}/"{lib,include} "$product_dir/" || true
+          fi
         if: always()
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
@@ -122,26 +145,40 @@ jobs:
   curl:
     strategy:
       matrix:
-        target: [ios, android]
         component: [curl]
-        include:
-                    
+        config:
           # iOS Configuration
           - target: ios
             arch: arm64
+            abi: ""
             sdk: iphoneos
             api: "8.0"
             platform: iPhoneOS
-
-          # Android Configuration
+          # Android arm64-v8a
           - target: android
             arch: arm64
             abi: arm64-v8a
-            api: 35
-
+            sdk: ""
+            api: 21
+            platform: ""
+          # Android armeabi-v7a
+          - target: android
+            arch: arm
+            abi: armeabi-v7a
+            sdk: ""
+            api: 16
+            platform: ""
+          # Android x86_64
+          - target: android
+            arch: x86_64
+            abi: x86_64
+            sdk: ""
+            api: 21
+            platform: ""
+        include:
           # cURL version
           - component: curl
-            version: "8.16.0"
+            version: "7.68.0"
 
       fail-fast: false
 
@@ -159,24 +196,34 @@ jobs:
           export ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk-bundle
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
 
-          echo "arch=${{ matrix.arch }}" >> $GITHUB_ENV
-          echo "abi=${{ matrix.abi }}" >> $GITHUB_ENV
-          echo "sdk=${{ matrix.sdk }}" >> $GITHUB_ENV
-          echo "api=${{ matrix.api }}" >> $GITHUB_ENV
-          echo "platform=${{ matrix.platform }}" >> $GITHUB_ENV
+          echo "arch=${{ matrix.config.arch }}" >> $GITHUB_ENV
+          echo "abi=${{ matrix.config.abi }}" >> $GITHUB_ENV
+          echo "sdk=${{ matrix.config.sdk }}" >> $GITHUB_ENV
+          echo "api=${{ matrix.config.api }}" >> $GITHUB_ENV
+          echo "platform=${{ matrix.config.platform }}" >> $GITHUB_ENV
           echo "version=${{ matrix.version }}" >> $GITHUB_ENV
-          
-          echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.target }}-${{ matrix.arch }}" >> $GITHUB_ENV
+
+          # Use abi for Android, arch for iOS
+          if [ -n "${{ matrix.config.abi }}" ]; then
+            echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.config.target }}-${{ matrix.config.abi }}" >> $GITHUB_ENV
+          else
+            echo "product_dir=${{ matrix.component }}_${{ matrix.version }}-${{ matrix.config.target }}-${{ matrix.config.arch }}" >> $GITHUB_ENV
+          fi
 
           source $GITHUB_ENV
           set
-      - name: Build ${{ matrix.component }} for ${{ matrix.target }}
+      - name: Build ${{ matrix.component }} for ${{ matrix.config.target }} ${{ matrix.config.abi || matrix.config.arch }}
         run: |
           cd tools
-          ./build-${{ matrix.target }}-${{ matrix.component }}.sh
+          ./build-${{ matrix.config.target }}-${{ matrix.component }}.sh
           cd ..
           mkdir -p "$product_dir/"{lib,include}
-          mv "output/${{ matrix.target }}/${{ matrix.component }}-${{ matrix.abi || matrix.arch }}/"{lib,include} "$product_dir/" || true
+          # For Android use abi, for iOS use arch
+          if [ -n "${{ matrix.config.abi }}" ]; then
+            mv "output/${{ matrix.config.target }}/${{ matrix.component }}-${{ matrix.config.abi }}/"{lib,include} "$product_dir/" || true
+          else
+            mv "output/${{ matrix.config.target }}/${{ matrix.component }}-${{ matrix.config.arch }}/"{lib,include} "$product_dir/" || true
+          fi
         if: always()
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
