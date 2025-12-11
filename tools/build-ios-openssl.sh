@@ -51,7 +51,7 @@ echo "https://www.openssl.org/source/${LIB_NAME}.tar.gz"
 # https://github.com/openssl/openssl/archive/OpenSSL_1_1_1f.tar.gz
 DEVELOPER=$(xcode-select -print-path)
 rm -rf "${LIB_DEST_DIR}" "${LIB_NAME}"
-[ -f "${LIB_NAME}.tar.gz" ] || curl https://www.openssl.org/source/${LIB_NAME}.tar.gz >${LIB_NAME}.tar.gz
+[ -f "${LIB_NAME}.tar.gz" ] || curl -L https://www.openssl.org/source/${LIB_NAME}.tar.gz -o ${LIB_NAME}.tar.gz
 
 function configure_make() {
 
