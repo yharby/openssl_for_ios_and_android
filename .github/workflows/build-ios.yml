@@ -1,0 +1,463 @@
+#
+# Unified Modern Workflow: Build OpenSSL, nghttp2, and cURL for iOS
+#
+# Features:
+# - Dynamic version detection (latest stable releases)
+# - XCFramework output for modern iOS development
+# - Supports device (arm64) and simulator (arm64 + x86_64)
+# - Semantic versioning for releases
+#
+
+name: Build iOS Libraries
+
+on:
+  workflow_dispatch:
+    inputs:
+      openssl_version:
+        description: 'OpenSSL version (e.g., 3.0.15, leave empty for latest LTS)'
+        required: false
+        default: ''
+      curl_version:
+        description: 'cURL version (e.g., 8.11.1, leave empty for latest)'
+        required: false
+        default: ''
+      nghttp2_version:
+        description: 'nghttp2 version (e.g., 1.64.0, leave empty for latest)'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild even if release exists'
+        type: boolean
+        default: false
+  schedule:
+    # Check for new versions monthly (1st of each month at 1am)
+    - cron: '0 1 1 * *'
+
+env:
+  # Minimum iOS version
+  IOS_MIN_VERSION: "12.0"
+
+jobs:
+  # ============================================================
+  # Job 1: Detect latest versions and check if build needed
+  # ============================================================
+  prepare:
+    name: Prepare Build
+    runs-on: ubuntu-latest
+    outputs:
+      openssl_version: ${{ steps.versions.outputs.openssl }}
+      curl_version: ${{ steps.versions.outputs.curl }}
+      nghttp2_version: ${{ steps.versions.outputs.nghttp2 }}
+      release_tag: ${{ steps.versions.outputs.release_tag }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Latest Versions
+        id: versions
+        run: |
+          # OpenSSL - Get latest 3.0.x LTS version
+          if [ -n "${{ github.event.inputs.openssl_version }}" ]; then
+            OPENSSL_VERSION="${{ github.event.inputs.openssl_version }}"
+          else
+            OPENSSL_VERSION=$(curl -s https://api.github.com/repos/openssl/openssl/releases | \
+              jq -r '[.[] | select(.tag_name | startswith("openssl-3.0")) | select(.prerelease == false)] | .[0].tag_name' | \
+              sed 's/openssl-//')
+            [ -z "$OPENSSL_VERSION" ] || [ "$OPENSSL_VERSION" = "null" ] && OPENSSL_VERSION="3.0.15"
+          fi
+          echo "openssl=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
+
+          # cURL - Get latest stable version
+          if [ -n "${{ github.event.inputs.curl_version }}" ]; then
+            CURL_VERSION="${{ github.event.inputs.curl_version }}"
+          else
+            CURL_VERSION=$(curl -s https://api.github.com/repos/curl/curl/releases/latest | \
+              jq -r '.tag_name' | sed 's/curl-//' | tr '_' '.')
+            [ -z "$CURL_VERSION" ] || [ "$CURL_VERSION" = "null" ] && CURL_VERSION="8.11.1"
+          fi
+          echo "curl=$CURL_VERSION" >> $GITHUB_OUTPUT
+
+          # nghttp2 - Get latest stable version
+          if [ -n "${{ github.event.inputs.nghttp2_version }}" ]; then
+            NGHTTP2_VERSION="${{ github.event.inputs.nghttp2_version }}"
+          else
+            NGHTTP2_VERSION=$(curl -s https://api.github.com/repos/nghttp2/nghttp2/releases/latest | \
+              jq -r '.tag_name' | sed 's/^v//')
+            [ -z "$NGHTTP2_VERSION" ] || [ "$NGHTTP2_VERSION" = "null" ] && NGHTTP2_VERSION="1.64.0"
+          fi
+          echo "nghttp2=$NGHTTP2_VERSION" >> $GITHUB_OUTPUT
+
+          # Create release tag
+          RELEASE_TAG="ios-openssl${OPENSSL_VERSION}-curl${CURL_VERSION}"
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+
+          echo "Versions: OpenSSL=$OPENSSL_VERSION, cURL=$CURL_VERSION, nghttp2=$NGHTTP2_VERSION"
+          echo "Release tag: $RELEASE_TAG"
+
+      - name: Check if Release Exists
+        id: check
+        run: |
+          RELEASE_TAG="${{ steps.versions.outputs.release_tag }}"
+          FORCE="${{ github.event.inputs.force_rebuild }}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif gh release view "$RELEASE_TAG" &>/dev/null; then
+            echo "Release $RELEASE_TAG already exists, skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release $RELEASE_TAG does not exist, will build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # Job 2: Build all libraries for iOS
+  # ============================================================
+  build:
+    name: Build iOS Libraries
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # iOS Device
+          - platform: iphoneos
+            arch: arm64
+            sdk: iphoneos
+            target: ios-arm64
+            openssl_target: ios64-xcrun
+          # iOS Simulator (Apple Silicon)
+          - platform: iphonesimulator
+            arch: arm64
+            sdk: iphonesimulator
+            target: ios-simulator-arm64
+            openssl_target: iossimulator-xcrun
+          # iOS Simulator (Intel)
+          - platform: iphonesimulator
+            arch: x86_64
+            sdk: iphonesimulator
+            target: ios-simulator-x86_64
+            openssl_target: iossimulator-xcrun
+
+    steps:
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Download OpenSSL Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.openssl_version }}"
+          curl -LO "https://github.com/openssl/openssl/releases/download/openssl-${VERSION}/openssl-${VERSION}.tar.gz"
+          tar xzf openssl-${VERSION}.tar.gz
+          mv openssl-${VERSION} openssl-src
+
+      - name: Download nghttp2 Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.nghttp2_version }}"
+          curl -LO "https://github.com/nghttp2/nghttp2/releases/download/v${VERSION}/nghttp2-${VERSION}.tar.gz"
+          tar xzf nghttp2-${VERSION}.tar.gz
+          mv nghttp2-${VERSION} nghttp2-src
+
+      - name: Download cURL Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.curl_version }}"
+          CURL_TAG="curl-$(echo $VERSION | tr '.' '_')"
+          curl -LO "https://github.com/curl/curl/releases/download/${CURL_TAG}/curl-${VERSION}.tar.gz"
+          tar xzf curl-${VERSION}.tar.gz
+          mv curl-${VERSION} curl-src
+
+      - name: Build OpenSSL
+        run: |
+          cd openssl-src
+
+          SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
+
+          # Set architecture-specific compiler flags
+          if [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphoneos" ]; then
+            export CFLAGS="-arch arm64 -isysroot ${SDK_PATH} -mios-version-min=${{ env.IOS_MIN_VERSION }} -fembed-bitcode -fPIC"
+            TARGET="${{ matrix.openssl_target }}"
+          elif [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphonesimulator" ]; then
+            export CFLAGS="-arch arm64 -isysroot ${SDK_PATH} -mios-simulator-version-min=${{ env.IOS_MIN_VERSION }} -fPIC"
+            TARGET="iossimulator-xcrun"
+          else
+            export CFLAGS="-arch x86_64 -isysroot ${SDK_PATH} -mios-simulator-version-min=${{ env.IOS_MIN_VERSION }} -fPIC"
+            TARGET="iossimulator-xcrun"
+          fi
+
+          export CROSS_TOP="$(xcode-select -p)/Platforms/${{ matrix.platform == 'iphoneos' && 'iPhoneOS' || 'iPhoneSimulator' }}.platform/Developer"
+          export CROSS_SDK="${{ matrix.platform == 'iphoneos' && 'iPhoneOS' || 'iPhoneSimulator' }}.sdk"
+
+          ./Configure ${TARGET} \
+            --prefix="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/openssl" \
+            no-shared \
+            no-tests \
+            no-async
+
+          make -j$(sysctl -n hw.ncpu)
+          make install_sw
+
+      - name: Build nghttp2
+        run: |
+          cd nghttp2-src
+
+          SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
+
+          if [ "${{ matrix.platform }}" = "iphoneos" ]; then
+            MIN_VERSION_FLAG="-mios-version-min=${{ env.IOS_MIN_VERSION }}"
+          else
+            MIN_VERSION_FLAG="-mios-simulator-version-min=${{ env.IOS_MIN_VERSION }}"
+          fi
+
+          export CC="$(xcrun --sdk ${{ matrix.sdk }} --find clang)"
+          export CXX="$(xcrun --sdk ${{ matrix.sdk }} --find clang++)"
+          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2"
+          export CXXFLAGS="${CFLAGS}"
+          export LDFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH}"
+
+          if [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphoneos" ]; then
+            HOST="arm-apple-darwin"
+          elif [ "${{ matrix.arch }}" = "arm64" ]; then
+            HOST="arm-apple-darwin"
+          else
+            HOST="x86_64-apple-darwin"
+          fi
+
+          ./configure \
+            --host=${HOST} \
+            --prefix="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/nghttp2" \
+            --disable-shared \
+            --enable-static \
+            --enable-lib-only \
+            --disable-python-bindings
+
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
+      - name: Build cURL
+        run: |
+          cd curl-src
+
+          SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
+          OPENSSL_DIR="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/openssl"
+          NGHTTP2_DIR="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/nghttp2"
+
+          if [ "${{ matrix.platform }}" = "iphoneos" ]; then
+            MIN_VERSION_FLAG="-mios-version-min=${{ env.IOS_MIN_VERSION }}"
+          else
+            MIN_VERSION_FLAG="-mios-simulator-version-min=${{ env.IOS_MIN_VERSION }}"
+          fi
+
+          export CC="$(xcrun --sdk ${{ matrix.sdk }} --find clang)"
+          export CXX="$(xcrun --sdk ${{ matrix.sdk }} --find clang++)"
+          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2"
+          export CXXFLAGS="${CFLAGS}"
+          export LDFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} -L${OPENSSL_DIR}/lib -L${NGHTTP2_DIR}/lib"
+          export CPPFLAGS="-I${OPENSSL_DIR}/include -I${NGHTTP2_DIR}/include"
+
+          if [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphoneos" ]; then
+            HOST="arm-apple-darwin"
+          elif [ "${{ matrix.arch }}" = "arm64" ]; then
+            HOST="arm-apple-darwin"
+          else
+            HOST="x86_64-apple-darwin"
+          fi
+
+          ./configure \
+            --host=${HOST} \
+            --prefix="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/curl" \
+            --with-ssl="${OPENSSL_DIR}" \
+            --with-nghttp2="${NGHTTP2_DIR}" \
+            --disable-shared \
+            --enable-static \
+            --enable-ipv6 \
+            --disable-manual \
+            --disable-verbose
+
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
+      - name: Verify Builds
+        run: |
+          echo "=== Verifying builds for ${{ matrix.target }} ==="
+          for lib in openssl nghttp2 curl; do
+            echo "--- $lib ---"
+            ls -la output/${{ matrix.target }}/${lib}/lib/
+          done
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-libs-${{ matrix.target }}
+          path: output/${{ matrix.target }}
+          retention-days: 1
+
+  # ============================================================
+  # Job 3: Create XCFrameworks and Release
+  # ============================================================
+  release:
+    name: Create XCFrameworks & Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: macos-14
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ios-libs-*
+          path: artifacts
+
+      - name: Create Fat Libraries for Simulator
+        run: |
+          # Combine simulator arm64 and x86_64 into fat binaries
+          mkdir -p fat-simulator/{openssl,nghttp2,curl}/{lib,include}
+
+          for lib in libssl libcrypto; do
+            lipo -create \
+              artifacts/ios-libs-ios-simulator-arm64/openssl/lib/${lib}.a \
+              artifacts/ios-libs-ios-simulator-x86_64/openssl/lib/${lib}.a \
+              -output fat-simulator/openssl/lib/${lib}.a
+          done
+          cp -r artifacts/ios-libs-ios-simulator-arm64/openssl/include/* fat-simulator/openssl/include/
+
+          lipo -create \
+            artifacts/ios-libs-ios-simulator-arm64/nghttp2/lib/libnghttp2.a \
+            artifacts/ios-libs-ios-simulator-x86_64/nghttp2/lib/libnghttp2.a \
+            -output fat-simulator/nghttp2/lib/libnghttp2.a
+          cp -r artifacts/ios-libs-ios-simulator-arm64/nghttp2/include/* fat-simulator/nghttp2/include/
+
+          lipo -create \
+            artifacts/ios-libs-ios-simulator-arm64/curl/lib/libcurl.a \
+            artifacts/ios-libs-ios-simulator-x86_64/curl/lib/libcurl.a \
+            -output fat-simulator/curl/lib/libcurl.a
+          cp -r artifacts/ios-libs-ios-simulator-arm64/curl/include/* fat-simulator/curl/include/
+
+          echo "=== Fat simulator libraries ==="
+          file fat-simulator/*/lib/*.a
+
+      - name: Create XCFrameworks
+        run: |
+          mkdir -p xcframeworks release
+
+          # OpenSSL XCFramework (combined libssl + libcrypto)
+          # First create combined static lib for each platform
+          mkdir -p combined-device combined-simulator
+
+          # Device
+          libtool -static -o combined-device/libopenssl.a \
+            artifacts/ios-libs-ios-arm64/openssl/lib/libssl.a \
+            artifacts/ios-libs-ios-arm64/openssl/lib/libcrypto.a
+
+          # Simulator (fat)
+          libtool -static -o combined-simulator/libopenssl.a \
+            fat-simulator/openssl/lib/libssl.a \
+            fat-simulator/openssl/lib/libcrypto.a
+
+          # Create XCFramework for OpenSSL
+          xcodebuild -create-xcframework \
+            -library combined-device/libopenssl.a \
+            -headers artifacts/ios-libs-ios-arm64/openssl/include \
+            -library combined-simulator/libopenssl.a \
+            -headers fat-simulator/openssl/include \
+            -output xcframeworks/OpenSSL.xcframework
+
+          # nghttp2 XCFramework
+          xcodebuild -create-xcframework \
+            -library artifacts/ios-libs-ios-arm64/nghttp2/lib/libnghttp2.a \
+            -headers artifacts/ios-libs-ios-arm64/nghttp2/include \
+            -library fat-simulator/nghttp2/lib/libnghttp2.a \
+            -headers fat-simulator/nghttp2/include \
+            -output xcframeworks/nghttp2.xcframework
+
+          # cURL XCFramework
+          xcodebuild -create-xcframework \
+            -library artifacts/ios-libs-ios-arm64/curl/lib/libcurl.a \
+            -headers artifacts/ios-libs-ios-arm64/curl/include \
+            -library fat-simulator/curl/lib/libcurl.a \
+            -headers fat-simulator/curl/include \
+            -output xcframeworks/libcurl.xcframework
+
+          echo "=== XCFrameworks created ==="
+          ls -la xcframeworks/
+
+      - name: Package Release Assets
+        run: |
+          OPENSSL_VERSION="${{ needs.prepare.outputs.openssl_version }}"
+          CURL_VERSION="${{ needs.prepare.outputs.curl_version }}"
+          NGHTTP2_VERSION="${{ needs.prepare.outputs.nghttp2_version }}"
+
+          # Package XCFrameworks
+          cd xcframeworks
+          zip -r ../release/OpenSSL.xcframework.zip OpenSSL.xcframework
+          zip -r ../release/nghttp2.xcframework.zip nghttp2.xcframework
+          zip -r ../release/libcurl.xcframework.zip libcurl.xcframework
+          cd ..
+
+          # Create combined package
+          zip -r release/ios-openssl-curl-nghttp2-xcframeworks.zip xcframeworks/
+
+          # Also create traditional static lib packages for device
+          cd artifacts/ios-libs-ios-arm64
+          zip -r ../../release/openssl_${OPENSSL_VERSION}-ios-arm64.zip openssl/
+          zip -r ../../release/nghttp2_${NGHTTP2_VERSION}-ios-arm64.zip nghttp2/
+          zip -r ../../release/curl_${CURL_VERSION}-ios-arm64.zip curl/
+          cd ../..
+
+          # Fat simulator libs
+          cd fat-simulator
+          zip -r ../release/openssl_${OPENSSL_VERSION}-ios-simulator.zip openssl/
+          zip -r ../release/nghttp2_${NGHTTP2_VERSION}-ios-simulator.zip nghttp2/
+          zip -r ../release/curl_${CURL_VERSION}-ios-simulator.zip curl/
+          cd ..
+
+          echo "=== Release assets ==="
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: "iOS: OpenSSL ${{ needs.prepare.outputs.openssl_version }} + cURL ${{ needs.prepare.outputs.curl_version }}"
+          body: |
+            ## Pre-built Libraries for iOS
+
+            ### Versions
+            | Library | Version |
+            |---------|---------|
+            | OpenSSL | ${{ needs.prepare.outputs.openssl_version }} |
+            | cURL | ${{ needs.prepare.outputs.curl_version }} |
+            | nghttp2 | ${{ needs.prepare.outputs.nghttp2_version }} |
+
+            ### Build Configuration
+            - **Minimum iOS Version**: ${{ env.IOS_MIN_VERSION }}
+            - **Architectures**: arm64 (device), arm64 + x86_64 (simulator)
+            - **Build Type**: Static libraries (.a) and XCFrameworks
+
+            ### Downloads
+
+            #### XCFrameworks (Recommended)
+            - `ios-openssl-curl-nghttp2-xcframeworks.zip` - All XCFrameworks combined
+            - Individual XCFrameworks for each library
+
+            #### Static Libraries
+            - Device (arm64) and Simulator (arm64 + x86_64 fat) builds
+
+            ### Usage with DuckDB httpfs
+            These libraries are built specifically for use with DuckDB's httpfs extension on iOS.
+
+            Built automatically by GitHub Actions.
+          files: release/*.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup Artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: ios-libs-*

@@ -1,0 +1,492 @@
+#
+# Unified Modern Workflow: Build OpenSSL, nghttp2, and cURL for Android
+#
+# Features:
+# - Dynamic version detection (latest stable releases)
+# - Matrix builds for all ABIs
+# - Modern NDK (r27c)
+# - Proper artifact handling
+# - Semantic versioning for releases
+#
+
+name: Build Android Libraries
+
+on:
+  workflow_dispatch:
+    inputs:
+      openssl_version:
+        description: 'OpenSSL version (e.g., 3.0.15, leave empty for latest LTS)'
+        required: false
+        default: ''
+      curl_version:
+        description: 'cURL version (e.g., 8.11.1, leave empty for latest)'
+        required: false
+        default: ''
+      nghttp2_version:
+        description: 'nghttp2 version (e.g., 1.64.0, leave empty for latest)'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild even if release exists'
+        type: boolean
+        default: false
+  schedule:
+    # Check for new versions monthly (1st of each month at midnight)
+    - cron: '0 0 1 * *'
+
+env:
+  # Minimum Android API level
+  ANDROID_API: 21
+  # NDK version - use latest stable
+  NDK_VERSION: r27c
+
+jobs:
+  # ============================================================
+  # Job 1: Detect latest versions and prepare build matrix
+  # ============================================================
+  prepare:
+    name: Prepare Build
+    runs-on: ubuntu-latest
+    outputs:
+      openssl_version: ${{ steps.versions.outputs.openssl }}
+      curl_version: ${{ steps.versions.outputs.curl }}
+      nghttp2_version: ${{ steps.versions.outputs.nghttp2 }}
+      release_tag: ${{ steps.versions.outputs.release_tag }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Latest Versions
+        id: versions
+        run: |
+          # OpenSSL - Get latest 3.0.x LTS version
+          if [ -n "${{ github.event.inputs.openssl_version }}" ]; then
+            OPENSSL_VERSION="${{ github.event.inputs.openssl_version }}"
+          else
+            OPENSSL_VERSION=$(curl -s https://api.github.com/repos/openssl/openssl/releases | \
+              jq -r '[.[] | select(.tag_name | startswith("openssl-3.0")) | select(.prerelease == false)] | .[0].tag_name' | \
+              sed 's/openssl-//')
+            # Fallback
+            [ -z "$OPENSSL_VERSION" ] || [ "$OPENSSL_VERSION" = "null" ] && OPENSSL_VERSION="3.0.15"
+          fi
+          echo "openssl=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
+          echo "OpenSSL version: $OPENSSL_VERSION"
+
+          # cURL - Get latest stable version
+          if [ -n "${{ github.event.inputs.curl_version }}" ]; then
+            CURL_VERSION="${{ github.event.inputs.curl_version }}"
+          else
+            CURL_VERSION=$(curl -s https://api.github.com/repos/curl/curl/releases/latest | \
+              jq -r '.tag_name' | sed 's/curl-//' | tr '_' '.')
+            [ -z "$CURL_VERSION" ] || [ "$CURL_VERSION" = "null" ] && CURL_VERSION="8.11.1"
+          fi
+          echo "curl=$CURL_VERSION" >> $GITHUB_OUTPUT
+          echo "cURL version: $CURL_VERSION"
+
+          # nghttp2 - Get latest stable version
+          if [ -n "${{ github.event.inputs.nghttp2_version }}" ]; then
+            NGHTTP2_VERSION="${{ github.event.inputs.nghttp2_version }}"
+          else
+            NGHTTP2_VERSION=$(curl -s https://api.github.com/repos/nghttp2/nghttp2/releases/latest | \
+              jq -r '.tag_name' | sed 's/^v//')
+            [ -z "$NGHTTP2_VERSION" ] || [ "$NGHTTP2_VERSION" = "null" ] && NGHTTP2_VERSION="1.64.0"
+          fi
+          echo "nghttp2=$NGHTTP2_VERSION" >> $GITHUB_OUTPUT
+          echo "nghttp2 version: $NGHTTP2_VERSION"
+
+          # Create release tag
+          RELEASE_TAG="android-openssl${OPENSSL_VERSION}-curl${CURL_VERSION}"
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "Release tag: $RELEASE_TAG"
+
+      - name: Check if Release Exists
+        id: check
+        run: |
+          RELEASE_TAG="${{ steps.versions.outputs.release_tag }}"
+          FORCE="${{ github.event.inputs.force_rebuild }}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif gh release view "$RELEASE_TAG" &>/dev/null; then
+            echo "Release $RELEASE_TAG already exists, skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release $RELEASE_TAG does not exist, will build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Build Matrix
+        id: matrix
+        run: |
+          # Define the build matrix as JSON
+          MATRIX=$(cat << 'EOF'
+          {
+            "include": [
+              {
+                "abi": "arm64-v8a",
+                "arch": "arm64",
+                "openssl_target": "android-arm64",
+                "host": "aarch64-linux-android",
+                "clang_prefix": "aarch64-linux-android"
+              },
+              {
+                "abi": "armeabi-v7a",
+                "arch": "arm",
+                "openssl_target": "android-arm",
+                "host": "arm-linux-androideabi",
+                "clang_prefix": "armv7a-linux-androideabi"
+              },
+              {
+                "abi": "x86_64",
+                "arch": "x86_64",
+                "openssl_target": "android-x86_64",
+                "host": "x86_64-linux-android",
+                "clang_prefix": "x86_64-linux-android"
+              }
+            ]
+          }
+          EOF
+          )
+          echo "matrix=$(echo $MATRIX | jq -c .)" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # Job 2: Build OpenSSL for each ABI
+  # ============================================================
+  build-openssl:
+    name: OpenSSL (${{ matrix.abi }})
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Download OpenSSL Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.openssl_version }}"
+          echo "Downloading OpenSSL $VERSION"
+          curl -LO "https://github.com/openssl/openssl/releases/download/openssl-${VERSION}/openssl-${VERSION}.tar.gz"
+          tar xzf openssl-${VERSION}.tar.gz
+          mv openssl-${VERSION} openssl-src
+
+      - name: Build OpenSSL
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cd openssl-src
+
+          # Setup toolchain
+          TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:$PATH"
+          export ANDROID_NDK_HOME="${ANDROID_NDK_ROOT}"
+
+          # Configure for Android
+          ./Configure ${{ matrix.openssl_target }} \
+            -D__ANDROID_API__=${{ env.ANDROID_API }} \
+            --prefix="${GITHUB_WORKSPACE}/output/openssl/${{ matrix.abi }}" \
+            no-shared \
+            no-tests \
+            -fPIC
+
+          # Build
+          make -j$(nproc)
+          make install_sw
+
+      - name: Verify Build
+        run: |
+          echo "=== Verifying OpenSSL build for ${{ matrix.abi }} ==="
+          ls -la output/openssl/${{ matrix.abi }}/lib/
+          file output/openssl/${{ matrix.abi }}/lib/libssl.a
+          file output/openssl/${{ matrix.abi }}/lib/libcrypto.a
+
+      - name: Upload OpenSSL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-${{ matrix.abi }}
+          path: output/openssl/${{ matrix.abi }}
+          retention-days: 1
+
+  # ============================================================
+  # Job 3: Build nghttp2 for each ABI
+  # ============================================================
+  build-nghttp2:
+    name: nghttp2 (${{ matrix.abi }})
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Download nghttp2 Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.nghttp2_version }}"
+          echo "Downloading nghttp2 $VERSION"
+          curl -LO "https://github.com/nghttp2/nghttp2/releases/download/v${VERSION}/nghttp2-${VERSION}.tar.gz"
+          tar xzf nghttp2-${VERSION}.tar.gz
+          mv nghttp2-${VERSION} nghttp2-src
+
+      - name: Build nghttp2
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cd nghttp2-src
+
+          # Setup toolchain
+          TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:$PATH"
+
+          export CC="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang"
+          export CXX="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang++"
+          export AR="${{ matrix.host }}-ar"
+          export RANLIB="${{ matrix.host }}-ranlib"
+          export STRIP="${{ matrix.host }}-strip"
+
+          export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
+          export CXXFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
+          export LDFLAGS="-Wl,--gc-sections"
+
+          # Configure
+          ./configure \
+            --host=${{ matrix.host }} \
+            --prefix="${GITHUB_WORKSPACE}/output/nghttp2/${{ matrix.abi }}" \
+            --disable-shared \
+            --enable-static \
+            --enable-lib-only \
+            --disable-python-bindings
+
+          # Build
+          make -j$(nproc)
+          make install
+
+      - name: Verify Build
+        run: |
+          echo "=== Verifying nghttp2 build for ${{ matrix.abi }} ==="
+          ls -la output/nghttp2/${{ matrix.abi }}/lib/
+          file output/nghttp2/${{ matrix.abi }}/lib/libnghttp2.a
+
+      - name: Upload nghttp2 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nghttp2-${{ matrix.abi }}
+          path: output/nghttp2/${{ matrix.abi }}
+          retention-days: 1
+
+  # ============================================================
+  # Job 4: Build cURL (depends on OpenSSL and nghttp2)
+  # ============================================================
+  build-curl:
+    name: cURL (${{ matrix.abi }})
+    needs: [prepare, build-openssl, build-nghttp2]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Download Dependencies
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-${{ matrix.abi }}"
+          path: deps
+
+      - name: Prepare Dependencies
+        run: |
+          mkdir -p output
+          mv deps/openssl-${{ matrix.abi }} output/openssl
+          mv deps/nghttp2-${{ matrix.abi }} output/nghttp2
+          ls -la output/
+
+      - name: Download cURL Source
+        run: |
+          VERSION="${{ needs.prepare.outputs.curl_version }}"
+          CURL_TAG="curl-$(echo $VERSION | tr '.' '_')"
+          echo "Downloading cURL $VERSION (tag: $CURL_TAG)"
+          curl -LO "https://github.com/curl/curl/releases/download/${CURL_TAG}/curl-${VERSION}.tar.gz"
+          tar xzf curl-${VERSION}.tar.gz
+          mv curl-${VERSION} curl-src
+
+      - name: Build cURL
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cd curl-src
+
+          # Setup toolchain
+          TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:$PATH"
+
+          export CC="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang"
+          export CXX="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang++"
+          export AR="${{ matrix.host }}-ar"
+          export RANLIB="${{ matrix.host }}-ranlib"
+          export STRIP="${{ matrix.host }}-strip"
+
+          OPENSSL_DIR="${GITHUB_WORKSPACE}/output/openssl"
+          NGHTTP2_DIR="${GITHUB_WORKSPACE}/output/nghttp2"
+
+          export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
+          export CXXFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
+          export LDFLAGS="-Wl,--gc-sections -L${OPENSSL_DIR}/lib -L${NGHTTP2_DIR}/lib"
+          export CPPFLAGS="-I${OPENSSL_DIR}/include -I${NGHTTP2_DIR}/include"
+
+          # Configure with OpenSSL and nghttp2
+          ./configure \
+            --host=${{ matrix.host }} \
+            --prefix="${GITHUB_WORKSPACE}/output/curl/${{ matrix.abi }}" \
+            --with-ssl="${OPENSSL_DIR}" \
+            --with-nghttp2="${NGHTTP2_DIR}" \
+            --disable-shared \
+            --enable-static \
+            --enable-ipv6 \
+            --disable-manual \
+            --disable-verbose
+
+          # Build
+          make -j$(nproc)
+          make install
+
+      - name: Verify Build
+        run: |
+          echo "=== Verifying cURL build for ${{ matrix.abi }} ==="
+          ls -la output/curl/${{ matrix.abi }}/lib/
+          file output/curl/${{ matrix.abi }}/lib/libcurl.a
+
+      - name: Upload cURL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: curl-${{ matrix.abi }}
+          path: output/curl/${{ matrix.abi }}
+          retention-days: 1
+
+  # ============================================================
+  # Job 5: Create Release with all libraries
+  # ============================================================
+  release:
+    name: Create Release
+    needs: [prepare, build-openssl, build-nghttp2, build-curl]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare Release Assets
+        run: |
+          OPENSSL_VERSION="${{ needs.prepare.outputs.openssl_version }}"
+          CURL_VERSION="${{ needs.prepare.outputs.curl_version }}"
+          NGHTTP2_VERSION="${{ needs.prepare.outputs.nghttp2_version }}"
+
+          mkdir -p release
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            echo "Packaging $abi..."
+
+            # Create combined package for each ABI
+            mkdir -p "combined-${abi}"/{lib,include}
+
+            # Copy libraries
+            cp artifacts/openssl-${abi}/lib/*.a combined-${abi}/lib/
+            cp artifacts/nghttp2-${abi}/lib/*.a combined-${abi}/lib/
+            cp artifacts/curl-${abi}/lib/*.a combined-${abi}/lib/
+
+            # Copy headers
+            cp -r artifacts/openssl-${abi}/include/* combined-${abi}/include/
+            cp -r artifacts/nghttp2-${abi}/include/* combined-${abi}/include/
+            cp -r artifacts/curl-${abi}/include/* combined-${abi}/include/
+
+            # Create combined zip
+            cd combined-${abi}
+            zip -r "../release/openssl-curl-nghttp2-android-${abi}.zip" .
+            cd ..
+
+            # Also create individual component zips
+            cd artifacts/openssl-${abi}
+            zip -r "../../release/openssl_${OPENSSL_VERSION}-android-${abi}.zip" .
+            cd ../..
+
+            cd artifacts/nghttp2-${abi}
+            zip -r "../../release/nghttp2_${NGHTTP2_VERSION}-android-${abi}.zip" .
+            cd ../..
+
+            cd artifacts/curl-${abi}
+            zip -r "../../release/curl_${CURL_VERSION}-android-${abi}.zip" .
+            cd ../..
+          done
+
+          echo "=== Release assets ==="
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: "Android: OpenSSL ${{ needs.prepare.outputs.openssl_version }} + cURL ${{ needs.prepare.outputs.curl_version }}"
+          body: |
+            ## Pre-built Libraries for Android
+
+            ### Versions
+            | Library | Version |
+            |---------|---------|
+            | OpenSSL | ${{ needs.prepare.outputs.openssl_version }} |
+            | cURL | ${{ needs.prepare.outputs.curl_version }} |
+            | nghttp2 | ${{ needs.prepare.outputs.nghttp2_version }} |
+
+            ### Architectures
+            - `arm64-v8a` - 64-bit ARM devices
+            - `armeabi-v7a` - 32-bit ARM devices
+            - `x86_64` - x86 emulator
+
+            ### Build Configuration
+            - **Minimum API Level**: ${{ env.ANDROID_API }}
+            - **NDK Version**: ${{ env.NDK_VERSION }}
+            - **Build Type**: Static libraries (.a)
+
+            ### Downloads
+            - **Combined packages** (`openssl-curl-nghttp2-android-{abi}.zip`): All libraries with headers
+            - **Individual packages**: Separate downloads for each library
+
+            ### Usage with DuckDB httpfs
+            These libraries are built specifically for use with DuckDB's httpfs extension on Android.
+
+            Built automatically by GitHub Actions.
+          files: release/*.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup Old Artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            openssl-*
+            nghttp2-*
+            curl-*
