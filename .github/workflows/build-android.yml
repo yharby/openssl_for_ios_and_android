@@ -257,9 +257,10 @@ jobs:
 
           export CC="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang"
           export CXX="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang++"
-          export AR="${{ matrix.host }}-ar"
-          export RANLIB="${{ matrix.host }}-ranlib"
-          export STRIP="${{ matrix.host }}-strip"
+          # Use llvm tools (modern NDK doesn't have prefixed binutils)
+          export AR="llvm-ar"
+          export RANLIB="llvm-ranlib"
+          export STRIP="llvm-strip"
 
           export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
           export CXXFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
@@ -271,8 +272,7 @@ jobs:
             --prefix="${GITHUB_WORKSPACE}/output/nghttp2/${{ matrix.abi }}" \
             --disable-shared \
             --enable-static \
-            --enable-lib-only \
-            --disable-python-bindings
+            --enable-lib-only
 
           # Build
           make -j$(nproc)
@@ -344,9 +344,10 @@ jobs:
 
           export CC="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang"
           export CXX="${{ matrix.clang_prefix }}${{ env.ANDROID_API }}-clang++"
-          export AR="${{ matrix.host }}-ar"
-          export RANLIB="${{ matrix.host }}-ranlib"
-          export STRIP="${{ matrix.host }}-strip"
+          # Use llvm tools (modern NDK doesn't have prefixed binutils)
+          export AR="llvm-ar"
+          export RANLIB="llvm-ranlib"
+          export STRIP="llvm-strip"
 
           OPENSSL_DIR="${GITHUB_WORKSPACE}/output/openssl"
           NGHTTP2_DIR="${GITHUB_WORKSPACE}/output/nghttp2"
