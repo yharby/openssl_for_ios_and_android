@@ -367,7 +367,11 @@ jobs:
             --enable-static \
             --enable-ipv6 \
             --disable-manual \
-            --disable-verbose
+            --disable-verbose \
+            --without-libpsl \
+            --without-libidn2 \
+            --disable-ldap \
+            --disable-ldaps
 
           # Build
           make -j$(nproc)
