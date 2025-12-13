@@ -290,7 +290,10 @@ jobs:
             --enable-static \
             --enable-ipv6 \
             --disable-manual \
-            --disable-verbose
+            --disable-verbose \
+            --without-libpsl \
+            --disable-ldap \
+            --disable-ldaps
 
           make -j$(sysctl -n hw.ncpu)
           make install
