@@ -210,21 +210,22 @@ jobs:
           SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
 
           if [ "${{ matrix.platform }}" = "iphoneos" ]; then
-            MIN_VERSION_FLAG="-mios-version-min=${{ env.IOS_MIN_VERSION }}"
+            MIN_VERSION_FLAG="-miphoneos-version-min=${{ env.IOS_MIN_VERSION }}"
           else
             MIN_VERSION_FLAG="-mios-simulator-version-min=${{ env.IOS_MIN_VERSION }}"
           fi
 
-          export CC="$(xcrun --sdk ${{ matrix.sdk }} --find clang)"
-          export CXX="$(xcrun --sdk ${{ matrix.sdk }} --find clang++)"
-          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2"
+          # Use xcrun wrapper for CC/CXX instead of full path
+          export CC="xcrun --sdk ${{ matrix.sdk }} clang"
+          export CXX="xcrun --sdk ${{ matrix.sdk }} clang++"
+          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2 -I${SDK_PATH}/usr/include"
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH}"
 
           if [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphoneos" ]; then
-            HOST="arm-apple-darwin"
+            HOST="aarch64-apple-darwin"
           elif [ "${{ matrix.arch }}" = "arm64" ]; then
-            HOST="arm-apple-darwin"
+            HOST="aarch64-apple-darwin"
           else
             HOST="x86_64-apple-darwin"
           fi
@@ -256,30 +257,28 @@ jobs:
           NGHTTP2_DIR="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/nghttp2"
 
           if [ "${{ matrix.platform }}" = "iphoneos" ]; then
-            MIN_VERSION_FLAG="-mios-version-min=${{ env.IOS_MIN_VERSION }}"
+            MIN_VERSION_FLAG="-miphoneos-version-min=${{ env.IOS_MIN_VERSION }}"
           else
             MIN_VERSION_FLAG="-mios-simulator-version-min=${{ env.IOS_MIN_VERSION }}"
           fi
 
-          export CC="$(xcrun --sdk ${{ matrix.sdk }} --find clang)"
-          export CXX="$(xcrun --sdk ${{ matrix.sdk }} --find clang++)"
-          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2"
+          # Use xcrun wrapper for CC/CXX instead of full path
+          # Setting CC to full clang path causes socket detection issues
+          # See: https://github.com/curl/curl/issues/4367
+          export CC="xcrun --sdk ${{ matrix.sdk }} clang"
+          export CXX="xcrun --sdk ${{ matrix.sdk }} clang++"
+          export CFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} ${MIN_VERSION_FLAG} -fPIC -O2 -I${SDK_PATH}/usr/include"
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-arch ${{ matrix.arch }} -isysroot ${SDK_PATH} -L${OPENSSL_DIR}/lib -L${NGHTTP2_DIR}/lib"
-          export CPPFLAGS="-I${OPENSSL_DIR}/include -I${NGHTTP2_DIR}/include"
+          export CPPFLAGS="-I${OPENSSL_DIR}/include -I${NGHTTP2_DIR}/include -I${SDK_PATH}/usr/include"
 
           if [ "${{ matrix.arch }}" = "arm64" ] && [ "${{ matrix.platform }}" = "iphoneos" ]; then
-            HOST="arm-apple-darwin"
+            HOST="aarch64-apple-darwin"
           elif [ "${{ matrix.arch }}" = "arm64" ]; then
-            HOST="arm-apple-darwin"
+            HOST="aarch64-apple-darwin"
           else
             HOST="x86_64-apple-darwin"
           fi
-
-          # Fix cross-compilation type detection issues
-          export ac_cv_type_uid_t=yes
-          export ac_cv_type_size_t=yes
-          export ac_cv_type_ssize_t=yes
 
           ./configure \
             --host=${HOST} \
