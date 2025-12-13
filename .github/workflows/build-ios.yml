@@ -229,6 +229,13 @@ jobs:
             HOST="x86_64-apple-darwin"
           fi
 
+          # Fix cross-compilation type detection issues
+          # Autoconf incorrectly redefines these types when cross-compiling,
+          # causing conflicts with iOS SDK headers
+          export ac_cv_type_uid_t=yes
+          export ac_cv_type_size_t=yes
+          export ac_cv_type_ssize_t=yes
+
           ./configure \
             --host=${HOST} \
             --prefix="${GITHUB_WORKSPACE}/output/${{ matrix.target }}/nghttp2" \
@@ -268,6 +275,11 @@ jobs:
           else
             HOST="x86_64-apple-darwin"
           fi
+
+          # Fix cross-compilation type detection issues
+          export ac_cv_type_uid_t=yes
+          export ac_cv_type_size_t=yes
+          export ac_cv_type_ssize_t=yes
 
           ./configure \
             --host=${HOST} \
